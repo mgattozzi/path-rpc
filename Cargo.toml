@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "path-rpc-server",
+    "path-rpc-client",
+    "path-rpc-common",
+]

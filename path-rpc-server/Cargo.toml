@@ -1,0 +1,11 @@
+[package]
+name = "path-rpc-server"
+version = "0.1.0"
+authors = ["Michael Gattozzi <mgattozzi@gmail.com>"]
+
+[dependencies]
+futures = "*"
+tokio-core = "*"
+petgraph = "*"
+failure = "*"
+antidote = "*"

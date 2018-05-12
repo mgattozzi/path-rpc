@@ -1,0 +1,10 @@
+[package]
+name = "path-rpc-common"
+version = "0.1.0"
+authors = ["Michael Gattozzi <mgattozzi@gmail.com>"]
+
+[dependencies]
+serde = "*"
+serde_json = "*"
+serde_derive = "*"
+failure = "*"
