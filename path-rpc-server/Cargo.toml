@@ -4,8 +4,21 @@ version = "0.1.0"
 authors = ["Michael Gattozzi <mgattozzi@gmail.com>"]
 
 [dependencies]
-futures = "*"
-tokio-core = "*"
-petgraph = "*"
-failure = "*"
 antidote = "*"
+bytes = "*"
+failure = "*"
+http = "*"
+httparse = "*"
+lazy_static = "*"
+num_cpus = "*"
+path-rpc-common = { path = "../path-rpc-common" }
+petgraph = "*"
+serde = "*"
+serde_derive = "*"
+serde_json = "*"
+time = "*"
+
+# These are technically out of date, but the requirement is for tokio-core and futures
+futures = "0.1"
+tokio-core = "*"
+tokio-io = "*"
