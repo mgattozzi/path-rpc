@@ -15,35 +15,25 @@ extern crate serde_json;
 extern crate tokio_core;
 extern crate tokio_io;
 
-use std::env;
-use std::fmt;
-use std::io;
-use std::net::{self, SocketAddr};
-use std::str;
-use std::sync::Arc;
-use std::u64;
-use std::{thread, time};
+use std::{
+    env, fmt, io, net::{self, SocketAddr}, str, sync::Arc, thread, time, u64,
+};
 
 use antidote::Mutex;
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, Local};
 use failure::{Error, Fail};
-use futures::future;
-use futures::sync::mpsc;
-use futures::{Future, Sink, Stream};
-use http::header::HeaderValue;
-use http::{Method, Request, Response, StatusCode};
-use petgraph::algo::astar;
-use petgraph::graphmap::DiGraphMap;
-use petgraph::visit::EdgeRef;
+use futures::{future, sync::mpsc, Future, Sink, Stream};
+use http::{header::HeaderValue, Method, Request, Response, StatusCode};
+use petgraph::{algo::astar, graphmap::DiGraphMap, visit::EdgeRef};
 use serde_json::Value;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::Core;
-use tokio_io::codec::{Decoder, Encoder};
-use tokio_io::AsyncRead;
+use tokio_core::{net::TcpStream, reactor::Core};
+use tokio_io::{
+    codec::{Decoder, Encoder}, AsyncRead,
+};
 
 lazy_static! {
-    /// Maintain the global state of the paths so that we can reference it wherever it is needed.
+    /// Maintain the global state of the paths and journeys so that we can reference it wherever it is needed.
     pub static ref STATE: State = { State::new() };
 }
 
@@ -75,11 +65,15 @@ fn main() -> Result<(), Error> {
         loop {
             {
                 let mut journeys = state.journey.lock();
+                // Not great that we're reallocating every time here and could be improved in the
+                // future. This was to avoid borrowing issues, but there's likely a better inplace
+                // way to do this.
                 *journeys = journeys
                     .iter()
                     .cloned()
                     .map(|(time, mut path)| {
                         if time >= Local::now() {
+                            // Iterate over each segment to change the weighting
                             for nodes in path.as_slice().windows(2) {
                                 let mut graph = state.paths.lock();
                                 // We know these are valid paths else A* would not have worked
@@ -87,6 +81,9 @@ fn main() -> Result<(), Error> {
                                 // Subtract the crowdedness
                                 *edge = *edge - CAR;
                             }
+                            // Empty the vec to signal these are the ones we want to clear next
+                            // time. Using time instead might cause the edge weight to increase and
+                            // never clear out.
                             path.clear();
                         }
                         (time, path)
@@ -94,16 +91,19 @@ fn main() -> Result<(), Error> {
                     .filter(|(_, path)| path.len() > 0)
                     .collect();
             }
+            // Try to avoid locking up resources too often by putting the thread to sleep
             thread::sleep(five_sec);
         }
     });
 
+    // Spawn all of our workers
     for _ in 0..num_threads - 1 {
         let (tx, rx) = mpsc::unbounded();
         channels.push(tx);
         thread::spawn(|| worker(rx));
     }
 
+    // As we get incoming connections send them to our workers
     let mut next = 0;
     for socket in listener.incoming() {
         if let Ok(socket) = socket {
@@ -115,11 +115,12 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-/// How much spawning a car will increase crowdedness on a path
+/// How much spawning a car will increase crowdedness on a path per edge it travels over
 const CAR: u64 = 1;
 
 #[derive(Clone)]
 pub struct State {
+    /// A Directed Graph containing all possible Cities and their edges and weights
     paths: Arc<Mutex<DiGraphMap<u64, u64>>>,
     /// A buffer holding currently running paths to allow for crowdedness
     /// As cars are added they get put here, then when the journey is complete their paths
@@ -128,6 +129,8 @@ pub struct State {
 }
 
 #[derive(Clone, Copy)]
+/// An enum of all cities that exist for this server, where DNE is Does Not Exist which acts as a
+/// catch all for bad requests
 pub enum City {
     NewYorkCity,
     Boston,
@@ -136,6 +139,7 @@ pub enum City {
     DNE,
 }
 
+// Map a City to what it's NodeId reference is
 impl Into<u64> for City {
     fn into(self) -> u64 {
         match self {
@@ -148,6 +152,7 @@ impl Into<u64> for City {
     }
 }
 
+// Turn the strings sent in by request into the City type
 impl<'a> From<&'a str> for City {
     fn from(item: &'a str) -> City {
         match item {
@@ -161,8 +166,10 @@ impl<'a> From<&'a str> for City {
 }
 
 impl State {
+    /// Initialize the server state
     fn new() -> Self {
-        // Unfortunately this is manual for now. Come up with something better
+        // Unfortunately this is manual for now. Future work would make this work based off reading
+        // from a file or something like that
         let mut map = DiGraphMap::new();
         let nyc = City::NewYorkCity.into();
         let bos = City::Boston.into();
@@ -183,6 +190,7 @@ impl State {
     }
 }
 
+/// Create a worker to handle incoming requests
 fn worker(rx: mpsc::UnboundedReceiver<net::TcpStream>) -> Result<(), Error> {
     let mut core = Core::new()?;
     let handle = core.handle();
@@ -215,12 +223,16 @@ fn worker(rx: mpsc::UnboundedReceiver<net::TcpStream>) -> Result<(), Error> {
     Ok(())
 }
 
-/// "Server logic" is implemented in this function.
+/// "Server logic" is implemented in this function. Given an HTTP Request it then figures out
+/// whether the request is valid, and if it is calculates the shortest path possible and returns
+/// that value to the user
 fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = io::Error> {
     let mut ret = Response::builder();
     let body = {
+        // We always return either an empty body or some JSON and this is the buffer it gets put in
         let mut bod = String::new();
 
+        // If the request is a POST request to the /path endpoint check to see if it's valid
         if *req.method() == Method::POST {
             match req.uri().path() {
                 "/path" => {
@@ -230,18 +242,30 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                     let state = STATE.clone();
                     let mut paths = state.paths.lock();
 
+                    // This is pretty lose and it would be best to return an RPC response here on
+                    // failure, but we can probably consider this okay for the purposes of an
+                    // example as Rust sends utf8 strings only
                     let body = str::from_utf8(req.body()).unwrap();
-                    rpc::Request::from_json(body).unwrap();
+
+                    // Parse the request and check that it is valid
                     if let Ok(req_json) = rpc::Request::from_json(body) {
+                        // json-rpc allows us to set a method. We can use this as a way to send
+                        // many requests to one endpoint but have it act differently based off the
+                        // type of method asked for
                         let method = &req_json.method == "get_path";
+                        // Due to jsons loosely typed nature we need to make sure we get an object
+                        // here
                         let params = req_json.params.is_object();
 
                         if method && params {
                             if let (Some(Value::String(start)), Some(Value::String(end))) =
                                 (req_json.params.get("start"), req_json.params.get("end"))
                             {
+                                // Get the start and end NodeIds from the input
                                 let start: u64 = City::from(start.as_str()).into();
                                 let end: u64 = City::from(end.as_str()).into();
+
+                                // Find the shortest path if possible
                                 if let Some((time, path)) = astar(
                                     &*paths,
                                     start,
@@ -250,11 +274,14 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                                     |_| 0,
                                 ) {
                                     let mut journey = state.journey.lock();
+                                    // Add the length in seconds to the time now as the journey
+                                    // length
                                     let time_out = Local::now()
                                         .checked_add_signed(Duration::seconds(time as i64))
                                         .unwrap();
                                     journey.push((time_out, path.clone()));
 
+                                    // Add the weights to the graph
                                     for nodes in path.as_slice().windows(2) {
                                         // We know these are valid paths else A* would not have worked
                                         let mut edge =
@@ -263,6 +290,7 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                                         *edge = *edge + CAR;
                                     }
 
+                                    // Send back the path as strings for the user
                                     let path = path.into_iter()
                                         .map(|i| {
                                             // TODO Make this abstraction sound and not leaky
@@ -278,9 +306,10 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                                         })
                                         .collect::<Vec<&str>>();
 
+                                    // Set the body of the response
                                     match rpc::Response::new(
                                         json!({ "distance": time, "path": path }),
-                                        0,
+                                        req_json.id,
                                     ).to_json()
                                     {
                                         Ok(json) => bod = json,
@@ -292,9 +321,10 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                                         }
                                     }
                                 } else {
+                                    // Send back an error message if invalid cities are used
                                     match rpc::Response::new(
                                         json!("Invalid start or end city given"),
-                                        0,
+                                        req_json.id,
                                     ).to_json()
                                     {
                                         Ok(json) => bod = json,
@@ -306,29 +336,26 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                                         }
                                     }
                                 }
+                            // TODO clean up the `if let else` statements with better abstractions
                             } else {
-                                println!("Bad JSON input 1");
                                 ret.status(StatusCode::BAD_REQUEST);
                             }
                         } else {
-                            println!("Bad JSON input 2");
                             ret.status(StatusCode::BAD_REQUEST);
                         }
                     } else {
-                        println!("Bad JSON input 3");
                         ret.status(StatusCode::BAD_REQUEST);
                     }
                 }
                 _ => {
-                    println!("Not Found 1");
                     ret.status(StatusCode::NOT_FOUND);
                 }
             }
         } else {
-            println!("Not Found 2");
             ret.status(StatusCode::NOT_FOUND);
         }
 
+        // Return the body
         bod
     };
     future::ok(ret.body(body).unwrap())
@@ -413,13 +440,13 @@ impl Decoder for Http {
                 (start, start + a.len())
             };
 
-            let mut body = 0;
+            let mut body_len = 0;
 
             for (i, header) in r.headers.iter().enumerate() {
                 if header.name == "Content-Length" {
                     // We know Content-Length will always be a number and valid utf8 so this is
                     // okay. This assumes that no one sends a malformed payload however.
-                    body = unsafe { str::from_utf8_unchecked(header.value) }
+                    body_len = unsafe { str::from_utf8_unchecked(header.value) }
                         .parse::<usize>()
                         .unwrap();
                 }
@@ -433,7 +460,7 @@ impl Decoder for Http {
                 toslice(r.path.unwrap().as_bytes()),
                 r.version.unwrap(),
                 amt,
-                body,
+                body_len,
             )
         };
         if version != 1 {

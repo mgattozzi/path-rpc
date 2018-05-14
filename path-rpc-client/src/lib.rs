@@ -28,6 +28,7 @@ use std::sync::Arc;
 unsafe impl Send for PathPlanner {}
 unsafe impl Sync for PathPlanner {}
 
+/// A client that will send requests to a path-rpc-server and can be used across threads
 pub struct PathPlanner {
     core: Arc<Mutex<Core>>,
     client: Arc<Client<HttpConnector>>,
@@ -35,6 +36,7 @@ pub struct PathPlanner {
 }
 
 impl PathPlanner {
+    /// Create a new client that will send requests to a path-rpc-server
     pub fn new(url: &str) -> Result<Self, Error> {
         let core = Core::new()?;
         let client = Client::new(&core.handle());
@@ -58,6 +60,7 @@ impl PathPlanner {
         id: u64,
     ) -> Result<impl Future<Item = Result<Response, Error>>, Error> {
         Ok(self.client
+            // Setup and execute the request
             .request({
                 let lock = self.url.lock();
                 let mut url = lock.clone();
@@ -73,6 +76,7 @@ impl PathPlanner {
                 req.set_body(body);
                 req
             })
+            // Turn the chunks of the body into the Response type or an error
             .and_then(|res| {
                 res.body().concat2().map(move |chunks| {
                     if chunks.is_empty() {
@@ -84,6 +88,7 @@ impl PathPlanner {
             }))
     }
 
+    /// Run any future given to the client
     pub fn run<T: Future>(&self, future: T) -> Result<T::Item, T::Error> {
         let mut lock = self.core.lock();
         lock.run(future)
