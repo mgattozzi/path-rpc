@@ -47,6 +47,17 @@ fn main() -> Result<(), Box<error::Error>> {
     planner.run(path1()).map_err(|_| err())?;
     planner.run(path1()).map_err(|_| err())?;
     planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
+    planner.run(path1()).map_err(|_| err())?;
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 extern crate antidote;
 extern crate bytes;
+extern crate chrono;
 extern crate failure;
 extern crate futures;
 extern crate http;
@@ -11,7 +12,6 @@ extern crate path_rpc_common as rpc;
 extern crate petgraph;
 #[macro_use]
 extern crate serde_json;
-extern crate time;
 extern crate tokio_core;
 extern crate tokio_io;
 
@@ -21,10 +21,12 @@ use std::io;
 use std::net::{self, SocketAddr};
 use std::str;
 use std::sync::Arc;
-use std::thread;
+use std::u64;
+use std::{thread, time};
 
 use antidote::Mutex;
 use bytes::{Bytes, BytesMut};
+use chrono::{DateTime, Duration, Local};
 use failure::{Error, Fail};
 use futures::future;
 use futures::sync::mpsc;
@@ -61,7 +63,42 @@ fn main() -> Result<(), Error> {
     println!("Listening on: {}", addr);
 
     let mut channels = Vec::new();
-    for _ in 0..num_threads {
+
+    // Spawn our thread that monitors the car traffic
+    thread::spawn(|| {
+        // Create a 5 second delay so that we're not always looping through what cars need to get
+        // removed next and deadlocking everything
+        let five_sec = time::Duration::from_millis(5000);
+        let state = STATE.clone();
+
+        // Keep looping till the server is killed
+        loop {
+            {
+                let mut journeys = state.journey.lock();
+                *journeys = journeys
+                    .iter()
+                    .cloned()
+                    .map(|(time, mut path)| {
+                        if time >= Local::now() {
+                            for nodes in path.as_slice().windows(2) {
+                                let mut graph = state.paths.lock();
+                                // We know these are valid paths else A* would not have worked
+                                let edge = graph.edge_weight_mut(nodes[0], nodes[1]).unwrap();
+                                // Subtract the crowdedness
+                                *edge = *edge - CAR;
+                            }
+                            path.clear();
+                        }
+                        (time, path)
+                    })
+                    .filter(|(_, path)| path.len() > 0)
+                    .collect();
+            }
+            thread::sleep(five_sec);
+        }
+    });
+
+    for _ in 0..num_threads - 1 {
         let (tx, rx) = mpsc::unbounded();
         channels.push(tx);
         thread::spawn(|| worker(rx));
@@ -83,22 +120,65 @@ const CAR: u64 = 1;
 
 #[derive(Clone)]
 pub struct State {
-    paths: Arc<Mutex<DiGraphMap<&'static str, u64>>>,
+    paths: Arc<Mutex<DiGraphMap<u64, u64>>>,
+    /// A buffer holding currently running paths to allow for crowdedness
+    /// As cars are added they get put here, then when the journey is complete their paths
+    /// have the time decreased
+    journey: Arc<Mutex<Vec<(DateTime<Local>, Vec<u64>)>>>,
+}
+
+#[derive(Clone, Copy)]
+pub enum City {
+    NewYorkCity,
+    Boston,
+    Providence,
+    BarHarbor,
+    DNE,
+}
+
+impl Into<u64> for City {
+    fn into(self) -> u64 {
+        match self {
+            City::NewYorkCity => 0,
+            City::Boston => 1,
+            City::Providence => 2,
+            City::BarHarbor => 3,
+            City::DNE => u64::MAX,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for City {
+    fn from(item: &'a str) -> City {
+        match item {
+            "New York City" => City::NewYorkCity,
+            "Boston" => City::Boston,
+            "Providence" => City::Providence,
+            "Bar Harbor" => City::BarHarbor,
+            _ => City::DNE,
+        }
+    }
 }
 
 impl State {
     fn new() -> Self {
         // Unfortunately this is manual for now. Come up with something better
         let mut map = DiGraphMap::new();
-        map.add_edge("New York City", "Boston", 3);
-        map.add_edge("New York City", "Providence", 2);
-        map.add_edge("Providence", "Boston", 1);
-        map.add_edge("Providence", "New York City", 3);
-        map.add_edge("Boston", "New York City", 5);
-        map.add_edge("Boston", "Bar Harbor", 6);
-        map.add_edge("Bar Harbor", "Boston", 5);
+        let nyc = City::NewYorkCity.into();
+        let bos = City::Boston.into();
+        let prov = City::Providence.into();
+        let bh = City::BarHarbor.into();
+        map.add_edge(nyc, bos, 3);
+        map.add_edge(nyc, prov, 2);
+        map.add_edge(prov, bos, 1);
+        map.add_edge(prov, nyc, 3);
+        map.add_edge(bos, nyc, 5);
+        map.add_edge(bos, bh, 6);
+        map.add_edge(bos, prov, 1);
+        map.add_edge(bh, bos, 5);
         Self {
             paths: Arc::new(Mutex::new(map)),
+            journey: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -148,7 +228,7 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
 
                     // Clone the state so we can have access to the paths
                     let state = STATE.clone();
-                    let paths = state.paths.lock();
+                    let mut paths = state.paths.lock();
 
                     let body = str::from_utf8(req.body()).unwrap();
                     rpc::Request::from_json(body).unwrap();
@@ -160,13 +240,44 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                             if let (Some(Value::String(start)), Some(Value::String(end))) =
                                 (req_json.params.get("start"), req_json.params.get("end"))
                             {
+                                let start: u64 = City::from(start.as_str()).into();
+                                let end: u64 = City::from(end.as_str()).into();
                                 if let Some((time, path)) = astar(
                                     &*paths,
-                                    &start,
-                                    |finish| finish == end,
+                                    start,
+                                    |finish: u64| finish == end,
                                     |e| *e.weight(),
                                     |_| 0,
                                 ) {
+                                    let mut journey = state.journey.lock();
+                                    let time_out = Local::now()
+                                        .checked_add_signed(Duration::seconds(time as i64))
+                                        .unwrap();
+                                    journey.push((time_out, path.clone()));
+
+                                    for nodes in path.as_slice().windows(2) {
+                                        // We know these are valid paths else A* would not have worked
+                                        let mut edge =
+                                            paths.edge_weight_mut(nodes[0], nodes[1]).unwrap();
+                                        // Increase the crowdedness
+                                        *edge = *edge + CAR;
+                                    }
+
+                                    let path = path.into_iter()
+                                        .map(|i| {
+                                            // TODO Make this abstraction sound and not leaky
+                                            // Did this to get around some weird conversion trait
+                                            // bounds but this should be handled properly at some point
+                                            match i {
+                                                0 => "New York City",
+                                                1 => "Boston",
+                                                2 => "Providence",
+                                                3 => "Bar Harbor",
+                                                _ => "DNE",
+                                            }
+                                        })
+                                        .collect::<Vec<&str>>();
+
                                     match rpc::Response::new(
                                         json!({ "distance": time, "path": path }),
                                         0,
@@ -299,7 +410,6 @@ impl Decoder for Http {
 
             let toslice = |a: &[u8]| {
                 let start = a.as_ptr() as usize - src.as_ptr() as usize;
-                assert!(start < src.len());
                 (start, start + a.len())
             };
 

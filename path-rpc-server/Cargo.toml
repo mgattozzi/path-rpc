@@ -6,6 +6,7 @@ authors = ["Michael Gattozzi <mgattozzi@gmail.com>"]
 [dependencies]
 antidote = "*"
 bytes = "*"
+chrono = "*"
 failure = "*"
 http = "*"
 httparse = "*"

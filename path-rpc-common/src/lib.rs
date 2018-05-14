@@ -4,9 +4,12 @@
 
 // We need macros for the tests but rustc doesn't know that so we allow them for this import
 #[allow(unused_imports)]
-#[macro_use] extern crate serde_json;
-#[macro_use] extern crate serde_derive;
-#[macro_use] extern crate failure;
+#[macro_use]
+extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate failure;
 extern crate serde;
 
 use serde_json::Value;
