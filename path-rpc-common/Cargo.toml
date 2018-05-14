@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Michael Gattozzi <mgattozzi@gmail.com>"]
 
 [dependencies]
-serde = "*"
-serde_json = "*"
-serde_derive = "*"
-failure = "*"
+serde = "1.0.55"
+serde_json = "1.0.17"
+serde_derive = "1.0.55"
+failure = "0.1.1"
