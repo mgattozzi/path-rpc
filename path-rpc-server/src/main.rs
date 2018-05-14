@@ -151,6 +151,7 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                     let paths = state.paths.lock();
 
                     let body = str::from_utf8(req.body()).unwrap();
+                    rpc::Request::from_json(body).unwrap();
                     if let Ok(req_json) = rpc::Request::from_json(body) {
                         let method = &req_json.method == "get_path";
                         let params = req_json.params.is_object();
@@ -195,20 +196,25 @@ fn respond(req: Request<Bytes>) -> impl Future<Item = Response<String>, Error = 
                                     }
                                 }
                             } else {
+                                println!("Bad JSON input 1");
                                 ret.status(StatusCode::BAD_REQUEST);
                             }
                         } else {
+                            println!("Bad JSON input 2");
                             ret.status(StatusCode::BAD_REQUEST);
                         }
                     } else {
+                        println!("Bad JSON input 3");
                         ret.status(StatusCode::BAD_REQUEST);
                     }
                 }
                 _ => {
+                    println!("Not Found 1");
                     ret.status(StatusCode::NOT_FOUND);
                 }
             }
         } else {
+            println!("Not Found 2");
             ret.status(StatusCode::NOT_FOUND);
         }
 

@@ -4,3 +4,10 @@ version = "0.1.0"
 authors = ["Michael Gattozzi <mgattozzi@gmail.com>"]
 
 [dependencies]
+hyper = "*"
+serde_json = "*"
+path-rpc-common = { path = "../path-rpc-common" }
+tokio-core = "*"
+futures = "0.1"
+failure = "*"
+antidote = "*"
